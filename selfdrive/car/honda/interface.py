@@ -158,7 +158,7 @@ class CarInterface(CarInterfaceBase):
     ret.lateralTuning.pid.kiBP, ret.lateralTuning.pid.kpBP = [[0.], [0.]]
     ret.lateralTuning.pid.kf = 0.00006 # conservative feed-forward
 
-    if candidate in [CAR.CIVIC, CAR.CIVIC_BOSCH]:
+    if candidate in [CAR.ACURA_ILX, CAR.CIVIC_BOSCH]:
       stop_and_go = True
       ret.mass = CivicParams.MASS
       ret.wheelbase = CivicParams.WHEELBASE
@@ -187,7 +187,7 @@ class CarInterface(CarInterfaceBase):
       ret.longitudinalTuning.kiBP = [0., 35.]
       ret.longitudinalTuning.kiV = [0.18, 0.12]
 
-    elif candidate == CAR.ACURA_ILX:
+    elif candidate == CAR.CIVIC:
       stop_and_go = True
       ret.mass = 1240. * CV.LB_TO_KG + STD_CARGO_KG
       ret.wheelbase = 2.66954
