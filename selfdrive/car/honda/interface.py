@@ -163,7 +163,7 @@ class CarInterface(CarInterfaceBase):
       ret.mass = CivicParams.MASS
       ret.wheelbase = CivicParams.WHEELBASE
       ret.centerToFront = CivicParams.CENTER_TO_FRONT
-      ret.steerRatio = 21.69  # 10.93 is end-to-end spec
+      ret.steerRatio = 16.1  # 10.93 is end-to-end spec
       tire_stiffness_factor = 1.
 
       ret.lateralTuning.pid.kpV, ret.lateralTuning.pid.kiV = [[0.8], [0.24]]
