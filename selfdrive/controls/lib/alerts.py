@@ -758,4 +758,12 @@ ALERTS = [
       "Lane Departure Detected",
       AlertStatus.userPrompt, AlertSize.mid,
       Priority.LOW, VisualAlert.steerRequired, AudibleAlert.chimePrompt, 1., 2., 3.),
+
+  # curve-speed advisory (custom) -- driver prompt only, no actuation
+  Alert(
+      "curveSpeedAdvisory",
+      "Curve ahead - ease off",
+      "",
+      AlertStatus.userPrompt, AlertSize.small,
+      Priority.LOW, VisualAlert.none, AudibleAlert.chimePrompt, .4, 0., 2.),
 ]

@@ -363,6 +363,26 @@ def data_send(sm, pm, CS, CI, CP, VM, state, events, actuators, v_cruise_kph, rk
     AM.add(sm.frame, 'ldwPermanent', False)
     events.append(create_event('ldw', [ET.PERMANENT]))
 
+  # Curve-speed advisory (no actuation): warn when the upcoming model path curvature
+  # would exceed a comfortable lateral accel at the current speed. This car has no
+  # longitudinal control, so it only prompts the driver to slow. Raise CURVE_WARN_MARGIN
+  # if you get nuisance alerts (the 0.7 model's curvature is noisy).
+  CURVE_WARN_MARGIN = 3.0  # m/s over the comfortable curve speed before warning
+  if len(md.path.poly) and CS.vEgo > 30 * CV.MPH_TO_MS:
+    _path = md.path.poly
+    _a_y_max = 2.975 - CS.vEgo * 0.0375   # comfortable lateral accel (same model as planner.py)
+    _max_curv = 0.0
+    for _x in range(0, 100, 5):
+      _yp = 3. * _path[0] * _x * _x + 2. * _path[1] * _x + _path[2]
+      _ypp = 6. * _path[0] * _x + 2. * _path[1]
+      _k = abs(_ypp) / (1. + _yp * _yp) ** 1.5
+      if _k > _max_curv:
+        _max_curv = _k
+    if _max_curv > 1e-4 and _a_y_max > 0.:
+      _v_safe = (_a_y_max / _max_curv) ** 0.5
+      if CS.vEgo > _v_safe + CURVE_WARN_MARGIN:
+        AM.add(sm.frame, 'curveSpeedAdvisory', False)
+
   AM.process_alerts(sm.frame)
   CC.hudControl.visualAlert = AM.visual_alert
 
