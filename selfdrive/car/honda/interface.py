@@ -415,7 +415,11 @@ class CarInterface(CarInterfaceBase):
     ret.steeringPressed = self.CS.steer_override
 
     # cruise state
-    ret.cruiseState.enabled = self.CS.v_cruise_pcm  != 0
+    # MAD MODE (jerredrogero): allow openpilot lateral to engage whenever cruise MAIN is on,
+    # WITHOUT requiring a stock-ACC set speed -> "lane-keep only" (you control the pedals).
+    # Engagement still needs a RES/SET press (controlsd only engages on ET.ENABLE); this does NOT auto-engage.
+    # Kill switch preserved: MAIN off -> wrongCarMode [USER_DISABLE + NO_ENTRY] (~line 500) force-disengages.
+    ret.cruiseState.enabled = bool(self.CS.main_on)  # was: self.CS.v_cruise_pcm != 0
     ret.cruiseState.speed = self.CS.v_cruise_pcm * CV.KPH_TO_MS
     ret.cruiseState.available = bool(self.CS.main_on) #and not bool(self.CS.cruise_mode)
     ret.cruiseState.speedOffset = 0 #self.CS.cruise_speed_offset
