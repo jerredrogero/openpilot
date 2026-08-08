@@ -3,6 +3,14 @@ import numpy as np
 from cereal import log
 
 CAMERA_OFFSET = 0.06  # m from center car to camera
+# Live-tunable override: write a value in meters to /data/camera_offset (e.g. `echo 0.09 > /data/camera_offset`)
+# then reboot. Changing it shifts where in the lane the car centers; nudge in small (~0.02-0.03 m) steps and
+# confirm which way it moves you on the first test drive. Default 0.06 = unchanged behavior.
+try:
+  with open('/data/camera_offset') as _cof:
+    CAMERA_OFFSET = float(_cof.read().strip())
+except Exception:
+  pass
 
 def compute_path_pinv(l=50):
   deg = 3

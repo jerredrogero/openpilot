@@ -144,6 +144,12 @@ typedef struct UIScene {
   bool engageable;
   bool monitoring_active;
 
+  // debug overlay (steer / lateral-PID tuning aid)
+  float angle_steers;
+  float angle_steers_des;
+  float pid_p, pid_i, pid_f, pid_output;
+  bool lat_saturated;
+
   bool uilayout_sidebarcollapsed;
   bool uilayout_mapenabled;
   // responsive layout
@@ -259,6 +265,7 @@ typedef struct UIState {
   int is_metric_timeout;
   int longitudinal_control_timeout;
   int limit_set_speed_timeout;
+  int is_debug_timeout;
 
   bool controls_seen;
 
@@ -266,6 +273,7 @@ typedef struct UIState {
   bool is_metric;
   bool longitudinal_control;
   bool limit_set_speed;
+  bool is_debug;
   float speed_lim_off;
   bool is_ego_over_limit;
   char alert_type[64];
@@ -684,11 +692,14 @@ static void ui_init_vision(UIState *s, const VisionStreamBufs back_bufs,
   read_param_bool(&s->is_metric, "IsMetric");
   read_param_bool(&s->longitudinal_control, "LongitudinalControl");
   read_param_bool(&s->limit_set_speed, "LimitSetSpeed");
+  s->is_debug = false;
+  read_param_bool(&s->is_debug, "ShowDebugUI");
 
   // Set offsets so params don't get read at the same time
   s->longitudinal_control_timeout = UI_FREQ / 3;
   s->is_metric_timeout = UI_FREQ / 2;
   s->limit_set_speed_timeout = UI_FREQ;
+  s->is_debug_timeout = UI_FREQ / 2;
 }
 
 // Projects a point in car to space to the corresponding point in full frame
@@ -1376,6 +1387,38 @@ static void ui_draw_vision_face(UIState *s) {
   nvgFill(s->vg);
 }
 
+static void ui_draw_debug(UIState *s) {
+  if (!s->is_debug) {
+    return;
+  }
+  const UIScene *scene = &s->scene;
+  const int x = scene->ui_viz_rx + 40;
+  int y = box_y + header_h + 40;
+  char str[128];
+
+  // translucent backdrop so text stays legible over the camera feed
+  nvgBeginPath(s->vg);
+  nvgRoundedRect(s->vg, x - 20, y - 20, 480, 5 * 46 + 24, 12);
+  nvgFillColor(s->vg, nvgRGBA(0, 0, 0, 130));
+  nvgFill(s->vg);
+
+  nvgFontFaceId(s->vg, s->font_courbd);
+  nvgFontSize(s->vg, 39);
+  nvgTextAlign(s->vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+  nvgFillColor(s->vg, nvgRGBA(255, 255, 255, 220));
+
+  snprintf(str, sizeof(str), "ang %6.2f des %6.2f", scene->angle_steers, scene->angle_steers_des);
+  nvgText(s->vg, x, y, str, NULL); y += 46;
+  snprintf(str, sizeof(str), "curv %8.4f", scene->curvature);
+  nvgText(s->vg, x, y, str, NULL); y += 46;
+  snprintf(str, sizeof(str), "p %6.3f  i %6.3f", scene->pid_p, scene->pid_i);
+  nvgText(s->vg, x, y, str, NULL); y += 46;
+  snprintf(str, sizeof(str), "f %6.3f  out %6.3f", scene->pid_f, scene->pid_output);
+  nvgText(s->vg, x, y, str, NULL); y += 46;
+  snprintf(str, sizeof(str), "sat %s", scene->lat_saturated ? "YES" : "no");
+  nvgText(s->vg, x, y, str, NULL); y += 46;
+}
+
 static void ui_draw_vision_header(UIState *s) {
   const UIScene *scene = &s->scene;
   int ui_viz_rx = scene->ui_viz_rx;
@@ -1505,6 +1548,7 @@ static void ui_draw_vision(UIState *s) {
 
   // Set Speed, Current Speed, Status/Events
   ui_draw_vision_header(s);
+  ui_draw_debug(s);
 
   if (s->scene.alert_size != ALERTSIZE_NONE) {
     // Controls Alerts
@@ -1621,6 +1665,17 @@ void handle_message(UIState *s, Message * msg) {
     s->scene.v_cruise = datad.vCruise;
     s->scene.v_ego = datad.vEgo;
     s->scene.curvature = datad.curvature;
+    s->scene.angle_steers = datad.angleSteers;
+    s->scene.angle_steers_des = datad.angleSteersDes;
+    if (datad.lateralControlState_which == cereal_ControlsState_lateralControlState_pidState) {
+      struct cereal_ControlsState_LateralPIDState pidd;
+      cereal_read_ControlsState_LateralPIDState(&pidd, datad.lateralControlState.pidState);
+      s->scene.pid_p = pidd.p;
+      s->scene.pid_i = pidd.i;
+      s->scene.pid_f = pidd.f;
+      s->scene.pid_output = pidd.output;
+      s->scene.lat_saturated = pidd.saturated;
+    }
     s->scene.engaged = datad.enabled;
     s->scene.engageable = datad.engageable;
     s->scene.gps_planner_active = datad.gpsPlannerActive;
@@ -2257,6 +2312,7 @@ int main(int argc, char* argv[]) {
     }
 
     read_param_bool_timeout(&s->is_metric, "IsMetric", &s->is_metric_timeout);
+    read_param_bool_timeout(&s->is_debug, "ShowDebugUI", &s->is_debug_timeout);
     read_param_bool_timeout(&s->longitudinal_control, "LongitudinalControl", &s->longitudinal_control_timeout);
     read_param_bool_timeout(&s->limit_set_speed, "LimitSetSpeed", &s->limit_set_speed_timeout);
     read_param_float_timeout(&s->speed_lim_off, "SpeedLimitOffset", &s->limit_set_speed_timeout);
