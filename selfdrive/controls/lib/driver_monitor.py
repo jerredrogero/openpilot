@@ -188,6 +188,13 @@ class DriverStatus():
     self._set_timers(self.face_detected)
 
   def update(self, events, driver_engaged, ctrl_active, standstill):
+    # Driver monitoring fully disabled (jerredrogero): always report attentive, never alert or force disengage.
+    # Revert by deleting the next 4 lines.
+    self.awareness = 1.
+    self.awareness_active = 1.
+    self.awareness_passive = 1.
+    return events
+
     if (driver_engaged and self.awareness > 0) or not ctrl_active:
       # reset only when on disengagement if red reached
       self.awareness = 1.
