@@ -2152,6 +2152,10 @@ static void* light_sensor_thread(void *args) {
     }
   }
 
+  // slow low-pass gravity estimate for dynamic (driving) G-force.
+  // Declared before the goto's below so the jump to `fail:` doesn't bypass an init (ill-formed in C++).
+  float grav_x = 0.f, grav_y = 0.f, grav_z = 9.81f;
+
   err = device->activate(device, SENSOR_LIGHT, 0);
   if (err != 0) goto fail;
   err = device->activate(device, SENSOR_LIGHT, 1);
@@ -2163,9 +2167,6 @@ static void* light_sensor_thread(void *args) {
     device->activate(device, SENSOR_ACCEL, 1);
     device->setDelay(device, SENSOR_ACCEL, ms2ns(50));
   }
-
-  // slow low-pass gravity estimate so we can display dynamic (driving) G-force
-  float grav_x = 0.f, grav_y = 0.f, grav_z = 9.81f;
 
   while (!do_exit) {
     static const size_t numEvents = 16;
