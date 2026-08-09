@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <unistd.h>
 #include <assert.h>
+#include <math.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
 
@@ -266,6 +267,7 @@ typedef struct UIState {
   int longitudinal_control_timeout;
   int limit_set_speed_timeout;
   int is_debug_timeout;
+  int is_dashboard_timeout;
 
   bool controls_seen;
 
@@ -274,6 +276,7 @@ typedef struct UIState {
   bool longitudinal_control;
   bool limit_set_speed;
   bool is_debug;
+  bool is_dashboard;
   float speed_lim_off;
   bool is_ego_over_limit;
   char alert_type[64];
@@ -283,6 +286,7 @@ typedef struct UIState {
   bool alert_blinked;
 
   float light_sensor;
+  float accel_x, accel_y, accel_z;  // phone-IMU dynamic G-force (gravity-removed, in g)
 
   int touch_fd;
 
@@ -694,12 +698,15 @@ static void ui_init_vision(UIState *s, const VisionStreamBufs back_bufs,
   read_param_bool(&s->limit_set_speed, "LimitSetSpeed");
   s->is_debug = false;
   read_param_bool(&s->is_debug, "ShowDebugUI");
+  s->is_dashboard = false;
+  read_param_bool(&s->is_dashboard, "ShowDashboard");
 
   // Set offsets so params don't get read at the same time
   s->longitudinal_control_timeout = UI_FREQ / 3;
   s->is_metric_timeout = UI_FREQ / 2;
   s->limit_set_speed_timeout = UI_FREQ;
   s->is_debug_timeout = UI_FREQ / 2;
+  s->is_dashboard_timeout = UI_FREQ / 2;
 }
 
 // Projects a point in car to space to the corresponding point in full frame
@@ -1419,6 +1426,62 @@ static void ui_draw_debug(UIState *s) {
   nvgText(s->vg, x, y, str, NULL); y += 46;
 }
 
+// Phone-IMU G-force meter: a dot in a ring showing dynamic lateral/longitudinal g,
+// plus the total magnitude. Data comes from the device accelerometer (no panda needed).
+static void ui_draw_dashboard(UIState *s) {
+  if (!s->is_dashboard) {
+    return;
+  }
+  char str[64];
+  const int R = 118;
+  const int cx = s->scene.ui_viz_rx + s->scene.ui_viz_rw - R - 60;
+  const int cy = box_y + header_h + R + 90;
+
+  // backdrop
+  nvgBeginPath(s->vg);
+  nvgRoundedRect(s->vg, cx - R - 30, cy - R - 66, 2 * R + 60, 2 * R + 150, 14);
+  nvgFillColor(s->vg, nvgRGBA(0, 0, 0, 130));
+  nvgFill(s->vg);
+
+  // title
+  nvgFontFaceId(s->vg, s->font_sans_semibold);
+  nvgFontSize(s->vg, 36);
+  nvgTextAlign(s->vg, NVG_ALIGN_CENTER | NVG_ALIGN_TOP);
+  nvgFillColor(s->vg, nvgRGBA(255, 255, 255, 220));
+  nvgText(s->vg, cx, cy - R - 56, "G-FORCE", NULL);
+
+  // rings (outer = 1.0 g, inner = 0.5 g)
+  nvgStrokeColor(s->vg, nvgRGBA(255, 255, 255, 90));
+  nvgStrokeWidth(s->vg, 3);
+  nvgBeginPath(s->vg);
+  nvgCircle(s->vg, cx, cy, R);
+  nvgStroke(s->vg);
+  nvgBeginPath(s->vg);
+  nvgCircle(s->vg, cx, cy, R * 0.5f);
+  nvgStroke(s->vg);
+
+  // dot: device y ~ lateral, device x ~ longitudinal; 1 g maps to the outer ring
+  float dx = s->accel_y * (float)R;
+  float dy = -s->accel_x * (float)R;
+  float mag = sqrtf(dx * dx + dy * dy);
+  if (mag > (float)R) {
+    dx = dx * (float)R / mag;
+    dy = dy * (float)R / mag;
+  }
+  nvgBeginPath(s->vg);
+  nvgCircle(s->vg, cx + dx, cy + dy, 15);
+  nvgFillColor(s->vg, nvgRGBA(0, 200, 255, 235));
+  nvgFill(s->vg);
+
+  // total magnitude readout
+  float gmag = sqrtf(s->accel_x * s->accel_x + s->accel_y * s->accel_y + s->accel_z * s->accel_z);
+  nvgFontFaceId(s->vg, s->font_courbd);
+  nvgFontSize(s->vg, 40);
+  nvgFillColor(s->vg, nvgRGBA(255, 255, 255, 230));
+  snprintf(str, sizeof(str), "%.2f g", gmag);
+  nvgText(s->vg, cx, cy + R + 18, str, NULL);
+}
+
 static void ui_draw_vision_header(UIState *s) {
   const UIScene *scene = &s->scene;
   int ui_viz_rx = scene->ui_viz_rx;
@@ -1549,6 +1612,7 @@ static void ui_draw_vision(UIState *s) {
   // Set Speed, Current Speed, Status/Events
   ui_draw_vision_header(s);
   ui_draw_debug(s);
+  ui_draw_dashboard(s);
 
   if (s->scene.alert_size != ALERTSIZE_NONE) {
     // Controls Alerts
@@ -2079,6 +2143,15 @@ static void* light_sensor_thread(void *args) {
 
   int SENSOR_LIGHT = 7;
 
+  // find the accelerometer's handle from the sensor list (for the G-force dashboard)
+  int SENSOR_ACCEL = -1;
+  for (int i = 0; i < count; i++) {
+    if (list[i].type == SENSOR_TYPE_ACCELEROMETER) {
+      SENSOR_ACCEL = list[i].handle;
+      break;
+    }
+  }
+
   err = device->activate(device, SENSOR_LIGHT, 0);
   if (err != 0) goto fail;
   err = device->activate(device, SENSOR_LIGHT, 1);
@@ -2086,16 +2159,36 @@ static void* light_sensor_thread(void *args) {
 
   device->setDelay(device, SENSOR_LIGHT, ms2ns(100));
 
+  if (SENSOR_ACCEL >= 0) {
+    device->activate(device, SENSOR_ACCEL, 1);
+    device->setDelay(device, SENSOR_ACCEL, ms2ns(50));
+  }
+
+  // slow low-pass gravity estimate so we can display dynamic (driving) G-force
+  float grav_x = 0.f, grav_y = 0.f, grav_z = 9.81f;
+
   while (!do_exit) {
-    static const size_t numEvents = 1;
+    static const size_t numEvents = 16;
     sensors_event_t buffer[numEvents];
 
     int n = device->poll(device, buffer, numEvents);
     if (n < 0) {
       LOG_100("light_sensor_poll failed: %d", n);
     }
-    if (n > 0) {
-      s->light_sensor = buffer[0].light;
+    for (int i = 0; i < n; i++) {
+      if (buffer[i].type == SENSOR_TYPE_LIGHT) {
+        s->light_sensor = buffer[i].light;
+      } else if (buffer[i].type == SENSOR_TYPE_ACCELEROMETER) {
+        float ax = buffer[i].acceleration.x;
+        float ay = buffer[i].acceleration.y;
+        float az = buffer[i].acceleration.z;
+        grav_x += 0.01f * (ax - grav_x);
+        grav_y += 0.01f * (ay - grav_y);
+        grav_z += 0.01f * (az - grav_z);
+        s->accel_x = (ax - grav_x) / 9.81f;
+        s->accel_y = (ay - grav_y) / 9.81f;
+        s->accel_z = (az - grav_z) / 9.81f;
+      }
     }
   }
 
@@ -2313,6 +2406,7 @@ int main(int argc, char* argv[]) {
 
     read_param_bool_timeout(&s->is_metric, "IsMetric", &s->is_metric_timeout);
     read_param_bool_timeout(&s->is_debug, "ShowDebugUI", &s->is_debug_timeout);
+    read_param_bool_timeout(&s->is_dashboard, "ShowDashboard", &s->is_dashboard_timeout);
     read_param_bool_timeout(&s->longitudinal_control, "LongitudinalControl", &s->longitudinal_control_timeout);
     read_param_bool_timeout(&s->limit_set_speed, "LimitSetSpeed", &s->limit_set_speed_timeout);
     read_param_float_timeout(&s->speed_lim_off, "SpeedLimitOffset", &s->limit_set_speed_timeout);
