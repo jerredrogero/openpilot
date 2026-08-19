@@ -41,6 +41,16 @@ def calc_states_after_delay(states, v_ego, steer_angle, curvature_factor, steer_
   return states
 
 
+# Nudgeless lane change delay, seconds. The blinker alone commits the change once it
+# has been on this long; a torque nudge still starts it immediately. Live-tunable:
+# `echo 0.8 > /data/lane_change_delay` then reboot. 0 disables the wait entirely.
+LANE_CHANGE_DELAY = 1.5
+try:
+  with open('/data/lane_change_delay') as _lcd:
+    LANE_CHANGE_DELAY = float(_lcd.read().strip())
+except Exception:
+  pass
+
 class PathPlanner():
   def __init__(self, CP):
     self.LP = LanePlanner()
@@ -53,6 +63,7 @@ class PathPlanner():
     self.path_offset_i = 0.0
     self.lane_change_state = LaneChangeState.off
     self.lane_change_timer = 0.0
+    self.pre_lane_change_timer = 0.0
     self.prev_one_blinker = False
 
   def setup_mpc(self):
@@ -106,13 +117,18 @@ class PathPlanner():
 
       # State transitions
       # off
-      if False: # self.lane_change_state == LaneChangeState.off and one_blinker and not self.prev_one_blinker:
+      if self.lane_change_state == LaneChangeState.off and one_blinker and not self.prev_one_blinker:
         self.lane_change_state = LaneChangeState.preLaneChange
 
       # pre
       elif self.lane_change_state == LaneChangeState.preLaneChange and not one_blinker:
         self.lane_change_state = LaneChangeState.off
-      elif self.lane_change_state == LaneChangeState.preLaneChange and torque_applied:
+      # NUDGELESS (2026-08-17): the blinker alone commits once it has been held for
+      # LANE_CHANGE_DELAY. A torque nudge still starts it immediately, so the nudge is
+      # now an accelerator rather than a requirement. NOTE: this car has no blind spot
+      # monitoring, so nothing here confirms the adjacent lane is clear.
+      elif self.lane_change_state == LaneChangeState.preLaneChange and \
+           (torque_applied or self.pre_lane_change_timer >= LANE_CHANGE_DELAY):
         self.lane_change_state = LaneChangeState.laneChangeStarting
 
       # starting
@@ -123,9 +139,22 @@ class PathPlanner():
       elif self.lane_change_state == LaneChangeState.laneChangeFinishing and lane_change_prob < 0.2:
         self.lane_change_state = LaneChangeState.preLaneChange
 
-      # Don't allow starting lane change below 45 mph
-      if (v_ego < 45 * CV.MPH_TO_MS) and (self.lane_change_state == LaneChangeState.preLaneChange):
-        self.lane_change_state = LaneChangeState.off
+      # Speed floor removed 2026-08-15 (Jerred): lane assist only runs with cruise
+      # MAIN on, which is not the case at intersections, so the signalled-turn hazard
+      # the 45 mph floor guarded against does not apply to how this car is driven.
+      #
+      # What replaces it is the EPS pedal interlock guard. This car's EPS refuses
+      # steering while the accelerator is pressed, so arming a lane change on the
+      # throttle would shift the target path with nothing steering behind it. Only
+      # arm when openpilot can actually act on it.
+      # (A gasPressed guard lived here as a workaround for the panda dropping steer
+      # frames on throttle; fixed at source 2026-08-17. Lane changes may now be armed
+      # and executed while accelerating, which is when you actually merge.)
+
+    if self.lane_change_state == LaneChangeState.preLaneChange:
+      self.pre_lane_change_timer += DT_MDL
+    else:
+      self.pre_lane_change_timer = 0.0
 
     if self.lane_change_state in [LaneChangeState.off, LaneChangeState.preLaneChange]:
       self.lane_change_timer = 0.0
@@ -163,8 +192,15 @@ class PathPlanner():
                         list(self.LP.l_poly), list(self.LP.r_poly), list(self.LP.d_poly),
                         self.LP.l_prob, self.LP.r_prob, curvature_factor, v_ego_mpc, self.LP.lane_width)
 
-    # reset to current steer angle if not active or overriding
-    if active:
+    # reset to current steer angle if not active or overriding.
+    # The override half was missing until 2026-08-19: the comment always said
+    # "or overriding" but the condition only tested `active`, so while the driver
+    # held the wheel the MPC kept running against its own solution and never resynced
+    # to where the car actually was -- on release it steered back to its old plan
+    # instead of continuing from the corrected position.
+    # steeringPressed only became real when STEER_STATUS was restored (2026-08-12);
+    # before that it was hardcoded False and this branch could never be taken.
+    if active and not sm['carState'].steeringPressed:
       delta_desired = self.mpc_solution[0].delta[1]
       rate_desired = math.degrees(self.mpc_solution[0].rate[0] * VM.sR)
     else:

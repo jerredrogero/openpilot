@@ -33,18 +33,14 @@ static void honda_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
   // state machine to enter and exit controls
   // 0x1A6 for the ILX, 0x296 for the Civic Touring
   if ((addr == 0x1A6) || (addr == 0x296)) {
-    int button = (GET_BYTE(to_push, 0) & 0xE0) >> 5;
-    switch (button) {
-      case 2:  // cancel
-        controls_allowed = 0;
-        break;
-      case 3:  // set
-      case 4:  // resume
-        controls_allowed = 1;
-        break;
-      default:
-        break; // any other button is irrelevant
-    }
+    // MAD MODE: cruise MAIN is the ONLY arming switch. MAIN_ON is SCM_BUTTONS bit 47
+    // in the dbc (47|1@0+), which is byte 5 mask 0x80. The stock set/resume/cancel
+    // buttons no longer arm or disarm, so stock cruise is optional and independent of
+    // lane keep. MAIN off is the kill switch. Brake still clears controls_allowed on
+    // 0x17C below, which pauses TX while braking without disengaging openpilot, since
+    // controlsd tolerates a 2 s mismatch (controlsd.py:137 mismatch_counter >= 200).
+    bool honda_main_on = (GET_BYTE(to_push, 5) & 0x80) != 0;
+    controls_allowed = honda_main_on ? 1 : 0;
   }
 
   // user brake signal on 0x17C reports applied brake from computer brake on accord
@@ -57,9 +53,10 @@ static void honda_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
   bool is_user_brake_msg = honda_alt_brake_msg ? ((addr) == 0x1BE) : ((addr) == 0x17C);
   if (is_user_brake_msg) {
     bool brake_pressed = honda_alt_brake_msg ? (GET_BYTE((to_push), 0) & 0x10) : (GET_BYTE((to_push), 6) & 0x20);
-    if (brake_pressed && (!(honda_brake_pressed_prev) || honda_moving)) {
-      controls_allowed = 0;
-    }
+    // Brake no longer clears controls_allowed (2026-08-17). Without this the RX hook
+    // would keep disarming at the 0x17C rate (~68 Hz) while MAIN re-armed at only 10 Hz,
+    // so steering would still go limp while braking even with the TX change above.
+    // honda_brake_pressed_prev is still maintained below for the rising-edge logic.
     honda_brake_pressed_prev = brake_pressed;
   }
 
@@ -142,8 +139,27 @@ static int honda_tx_hook(CAN_FIFOMailBox_TypeDef *to_send) {
 
   // disallow actuator commands if gas or brake (with vehicle moving) are pressed
   // and the the latching controls_allowed flag is True
-  int pedal_pressed = honda_gas_prev || (gas_interceptor_prev > HONDA_GAS_INTERCEPTOR_THRESHOLD) ||
-                      (honda_brake_pressed_prev && honda_moving);
+  // LATERAL-ONLY RIG (2026-08-17): the driver's throttle is not an override on this car,
+  // it is simply how the car is driven -- openpilot has no longitudinal control here.
+  // The RX path above already conditions driver gas on long_controls_allowed; this TX
+  // path did not, so EVERY steering frame was dropped whenever the pedal was down
+  // (measured: STEER_CONTROL_ACTIVE 1-5% with gas vs 99% without). Made consistent.
+  // Brake still cuts actuators below, and MAIN off is still an instant kill.
+  // LATERAL-ONLY RIG: openpilot has no longitudinal control on this car
+  // (interface.py: openpilotLongitudinalControl = False), so the driver MUST use the
+  // throttle. Stock logic treats driver gas as an override and drops every steering
+  // frame while the pedal is down, which blocked lateral control permanently.
+  //
+  // Do NOT try to gate this on long_controls_allowed: boardd sets that TRUE
+  // unconditionally (boardd.cc:136 sends control request 0xdf with wValue 1, and
+  // safety_declarations.h:56 defaults it true). That was tried on 2026-08-17 and was a
+  // measured no-op -- EPS ctrlActive stayed at 1% with gas.
+  //
+  // Brake still cuts actuators below, and MAIN off is still an instant kill.
+  // Brake removed from this list 2026-08-17 as well: on a lateral-only car, braking is
+  // ordinary driving (slowing in traffic while lane keeping), not an override. NOTE that
+  // after this NO PEDAL disarms the panda -- MAIN off is the remaining actuator kill.
+  int pedal_pressed = (gas_interceptor_prev > HONDA_GAS_INTERCEPTOR_THRESHOLD);
   bool current_controls_allowed = controls_allowed && !(pedal_pressed);
 
   // BRAKE: safety check

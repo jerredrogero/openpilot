@@ -41,8 +41,8 @@ def get_can_signals(CP):
       ("WHEEL_SPEED_RR", "WHEEL_SPEEDS", 0),
       ("STEER_ANGLE", "STEERING_SENSORS", 0),
       ("STEER_ANGLE_RATE", "STEERING_SENSORS", 0),
-      #("STEER_TORQUE_SENSOR", "STEER_STATUS", 0),
-      #("STEER_TORQUE_MOTOR", "STEER_STATUS", 0),
+      ("STEER_TORQUE_SENSOR", "STEER_STATUS", 0),
+      ("STEER_TORQUE_MOTOR", "STEER_STATUS", 0),
       ("LEFT_BLINKER", "SCM_FEEDBACK", 0),
       ("RIGHT_BLINKER", "SCM_FEEDBACK", 0),
       #("GEAR", "GEARBOX", 0),
@@ -55,7 +55,7 @@ def get_can_signals(CP):
       #("ESP_DISABLED", "VSA_STATUS", 1),
       #("USER_BRAKE", "VSA_STATUS", 0),
       #("BRAKE_HOLD_ACTIVE", "VSA_STATUS", 0),
-      #("STEER_STATUS", "STEER_STATUS", 5),
+      ("STEER_STATUS", "STEER_STATUS", 5),
       #("GEAR_SHIFTER", "GEARBOX", 0),
       ("PEDAL_GAS", "POWERTRAIN_DATA", 0),
       ("CRUISE_SETTING", "SCM_BUTTONS", 0),
@@ -152,7 +152,13 @@ class CarState():
                                      # cp.vl["DOORS_STATUS"]['DOOR_OPEN_RL'], cp.vl["DOORS_STATUS"]['DOOR_OPEN_RR']])
     self.seatbelt = True #not cp.vl["SEATBELT_STATUS"]['SEATBELT_DRIVER_LAMP'] and cp.vl["SEATBELT_STATUS"]['SEATBELT_DRIVER_LATCHED']
 
-    steer_status = 'NORMAL' #self.steer_status_values[0]#cp.vl["STEER_STATUS"]['STEER_STATUS']]
+    # RESTORED 2026-08-12. This message was disabled, which hardcoded steer_override to
+    # False (no driver override detection, so the PID integrator never froze and wound up
+    # to full torque) and hid every EPS fault. Validated against 23992 samples of 0x18F:
+    # driver torque mean 435 with the wheel still vs 1675 with it moving.
+    # NOTE: the dbc value table is lowercase, so upper() is required or every comparison
+    # below fails and steer_not_allowed becomes permanently True (no steering at all).
+    steer_status = self.steer_status_values[cp.vl["STEER_STATUS"]['STEER_STATUS']].upper()
     self.steer_error = steer_status not in ['NORMAL', 'NO_TORQUE_ALERT_1', 'NO_TORQUE_ALERT_2', 'LOW_SPEED_LOCKOUT', 'TMP_FAULT']
     # NO_TORQUE_ALERT_2 can be caused by bump OR steering nudge from driver
     self.steer_not_allowed = steer_status not in ['NORMAL', 'NO_TORQUE_ALERT_2']
@@ -223,9 +229,9 @@ class CarState():
    
     self.car_gas = cp.vl["POWERTRAIN_DATA"]['PEDAL_GAS']
 
-    self.steer_torque_driver = 0 #cp.vl["STEER_STATUS"]['STEER_TORQUE_SENSOR']
-    self.steer_torque_motor = 0 #cp.vl["STEER_STATUS"]['STEER_TORQUE_MOTOR']
-    self.steer_override = False #abs(self.steer_torque_driver) > STEER_THRESHOLD[self.CP.carFingerprint]
+    self.steer_torque_driver = cp.vl["STEER_STATUS"]['STEER_TORQUE_SENSOR']
+    self.steer_torque_motor = cp.vl["STEER_STATUS"]['STEER_TORQUE_MOTOR']
+    self.steer_override = abs(self.steer_torque_driver) > STEER_THRESHOLD[self.CP.carFingerprint]
 
     #self.brake_switch = cp.vl["POWERTRAIN_DATA"]['BRAKE_SWITCH']
 

@@ -13,6 +13,22 @@ from selfdrive.car import STD_CARGO_KG, CivicParams, scale_rot_inertia, scale_ti
 from selfdrive.controls.lib.planner import _A_CRUISE_MAX_V
 from selfdrive.car.interfaces import CarInterfaceBase
 
+
+def _live_tune(path, default):
+  """Read a lateral gain from /data at startup, falling back to the built-in default.
+
+  Same idea as /data/camera_offset and /data/lane_change_delay: change a value, reboot,
+  drive. Delete the file to go back to the default. Read once at CarParams time, so a
+  reboot is required -- these feed the PID constructor, not a per-frame path.
+  """
+  try:
+    with open(path) as f:
+      v = float(f.read().strip())
+    cloudlog.warning("live tune: %s = %s (default %s)" % (path, v, default))
+    return v
+  except Exception:
+    return default
+
 A_ACC_MAX = max(_A_CRUISE_MAX_V)
 
 ButtonType = car.CarState.ButtonEvent.Type
@@ -79,6 +95,7 @@ class CarInterface(CarInterfaceBase):
     self.frame = 0
     self.last_enable_pressed = 0
     self.last_enable_sent = 0
+    self.main_on_prev = False
     self.gas_pressed_prev = False
     self.brake_pressed_prev = False
 
@@ -156,7 +173,20 @@ class CarInterface(CarInterfaceBase):
     # For modeling details, see p.198-200 in "The Science of Vehicle Dynamics (2014), M. Guiggiani"
 
     ret.lateralTuning.pid.kiBP, ret.lateralTuning.pid.kpBP = [[0.], [0.]]
-    ret.lateralTuning.pid.kf = 0.00008 # feedforward raised from 0.00006 for crisper curve entry (jerredrogero tune step1)
+    # kf 0.00006 -> 0.00008 (Jerred, tune step 1) -> 0.00012 (2026-08-19, tune step 2).
+    # Sized from the first CLEAN curve data (drive 19-25-49, channel unblocked, STEER_MAX
+    # back at 0xF00). Engaged, bucketed by pathPlan.angleSteers:
+    #     5-10deg  mean|out| 0.429  mean|f| 0.222  -> 1.9x
+    #     10deg+   mean|out| 0.889  mean|f| 0.282  -> 3.2x
+    # so the feedforward is carrying roughly a third of what a steady curve needs and p
+    # supplies the rest, which it can only do AFTER error appears -- that lag is the
+    # late, wide curve entry. This is a deliberate half-step to 1.5x rather than the
+    # 2-3x the data suggests; too much feedforward overshoots INTO curves. Re-measure
+    # and step again if entry is still late.
+    # NOTE: tracking at 10deg+ is already ~0.75 deg of error, but clipped 77% of the
+    # time. kf cannot raise that ceiling (3840 is a hard EPS limit) -- it only removes
+    # lag at the same peak torque.
+    ret.lateralTuning.pid.kf = _live_tune('/data/lat_kf', 0.00012)
 
     if candidate in [CAR.ACURA_ILX, CAR.CIVIC_BOSCH]:
       stop_and_go = True
@@ -166,7 +196,8 @@ class CarInterface(CarInterfaceBase):
       ret.steerRatio = 16.1  # 10.93 is end-to-end spec
       tire_stiffness_factor = 1.
 
-      ret.lateralTuning.pid.kpV, ret.lateralTuning.pid.kiV = [[0.8], [0.24]]
+      ret.lateralTuning.pid.kpV = [_live_tune('/data/lat_kp', 0.8)]
+      ret.lateralTuning.pid.kiV = [_live_tune('/data/lat_ki', 0.24)]
       ret.longitudinalTuning.kpBP = [0., 5., 35.]
       ret.longitudinalTuning.kpV = [3.6, 2.4, 1.5]
       ret.longitudinalTuning.kiBP = [0., 35.]
@@ -327,7 +358,11 @@ class CarInterface(CarInterfaceBase):
     # min speed to enable ACC. if car can do stop and go, then set enabling speed
     # to a negative value, so it won't matter. Otherwise, add 0.5 mph margin to not
     # conflict with PCM acc
-    ret.minEnableSpeed = -1. if (stop_and_go or ret.enableGasInterceptor) else 25.5 * CV.MPH_TO_MS
+    # MAD MODE: the 25.5 mph floor exists so openpilot longitudinal does not fight the
+    # stock PCM below its ACC range. This rig is lateral only and the driver owns the
+    # pedals, so that range does not apply. No floor at all: lane keep may engage at
+    # any speed, including standstill.
+    ret.minEnableSpeed = -1.  # MAD MODE: no speed floor at all
 
     # TODO: get actual value, for now starting with reasonable value for
     # civic and scaling by mass and wheelbase
@@ -356,7 +391,14 @@ class CarInterface(CarInterfaceBase):
     ret.stoppingControl = True
     ret.startAccel = 0.5
 
-    ret.steerActuatorDelay = 0.1
+    # MEASURED 2026-08-17 on the 21-31-56 drive: cross-correlating commanded torque
+    # against carState.steeringRate over 32553 clean samples (engaged, coasting so the
+    # channel was not blocked, above 10 m/s) peaks at 0.04 s and declines monotonically
+    # after 0.06 -- so the stock 0.1 overestimated this rack lag by about double, and
+    # openpilot was anticipating further ahead than the car needed.
+    # Caveat: closed-loop correlation (command responds to angle, angle to command)
+    # biases the estimate, so read it as clearly under 0.10 rather than exactly 0.04.
+    ret.steerActuatorDelay = 0.05
     ret.steerRateCost = 0.5
     ret.steerLimitTimer = 0.8
 
@@ -484,6 +526,22 @@ class CarInterface(CarInterfaceBase):
 
     # events
     events = []
+    # EPS LATCH INDICATOR. ET.PERMANENT was dropped on 2026-08-13 because
+    # steerUnavailablePermanent painted 27826 frames on the 17:15 drive, which looked
+    # like spam. That was the wrong read: a PERMANENT alert is drawn every frame while
+    # the condition holds, so the count measured DURATION, not intrusiveness, and the
+    # alert itself is AlertSize.small / Priority.LOW_LOWEST / no sound -- a discreet
+    # status line reading 'LKAS Fault: Restart the car to engage'. The actual spam
+    # Jerred saw on the pedal was steerTempUnavailable + steerSaturated, which are
+    # engaged-time WARNING alerts and are untouched.
+    #
+    # Restored 2026-08-15. Measurement that justifies it: EPS FAULT_1 does NOT appear
+    # at connection time (two drives came up mid-trip with the engine already running
+    # and showed 0%% fault_1 in their opening segments) and was entirely absent from
+    # the 2026-08-14 drive. It appears later in a drive, after sustained saturation --
+    # i.e. the EPS giving up, which is the 'LKAS disabled for the rest of the trip'
+    # symptom. So this alert now fires when the EPS has genuinely latched, and stays
+    # off otherwise, which is exactly when it is worth telling the driver.
     if self.CS.steer_error:
       events.append(create_event('steerUnavailable', [ET.NO_ENTRY, ET.IMMEDIATE_DISABLE, ET.PERMANENT]))
     elif self.CS.steer_warning:
@@ -515,8 +573,11 @@ class CarInterface(CarInterfaceBase):
      #  (ret.brakePressed and (not self.brake_pressed_prev or ret.vEgo > 0.001)):
      # events.append(create_event('pedalPressed', [ET.NO_ENTRY, ET.USER_DISABLE]))
 
-    if ret.gasPressed:
-      events.append(create_event('pedalPressed', [ET.PRE_ENABLE]))
+    # MAD MODE: lateral only means the driver owns the pedals, so holding the gas
+    # must NOT hold openpilot in preEnabled. This line suppressed steering for the
+    # entire 2026-08-12 drive: pedalPressed x5245, 784 preEnabled vs 528 enabled.
+    # if ret.gasPressed:
+    #   events.append(create_event('pedalPressed', [ET.PRE_ENABLE]))
 
     # it can happen that car cruise disables while comma system is enabled: need to
     # keep braking if needed or if the speed is very low
@@ -531,17 +592,18 @@ class CarInterface(CarInterfaceBase):
 
     cur_time = self.frame * DT_CTRL
     enable_pressed = False
-    # handle button presses
-    for b in ret.buttonEvents:
+    # MAD MODE: cruise MAIN is the only switch. The stock set/resume/cancel buttons no
+    # longer engage or disengage openpilot, so stock cruise is entirely optional and
+    # independent of lane keep. Engagement comes only from the MAIN rising edge below,
+    # and MAIN off disengages through the wrongCarMode USER_DISABLE event above.
 
-      # do enable on both accel and decel buttons
-      if b.type in [ButtonType.accelCruise, ButtonType.decelCruise] and not b.pressed:
-        self.last_enable_pressed = cur_time
-        enable_pressed = True
-
-      # do disable on button down
-      if b.type == "cancel" and b.pressed:
-        events.append(create_event('buttonCancel', [ET.USER_DISABLE]))
+    # MAD MODE: a MAIN off->on transition counts as an enable press, so lane keep
+    # engages from MAIN alone. The panda agrees via the MAIN_ON arming in
+    # safety_honda.h, which is what stops the controlsMismatch disables.
+    if self.CS.main_on and not self.main_on_prev:
+      self.last_enable_pressed = cur_time
+      enable_pressed = True
+    self.main_on_prev = bool(self.CS.main_on)
 
     if self.CP.enableCruise:
       # KEEP THIS EVENT LAST! send enable event if button is pressed and there are

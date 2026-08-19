@@ -346,6 +346,14 @@ void ignition_can_hook(CAN_FIFOMailBox_TypeDef *to_push) {
       // this message isn't all zeros when ignition is on
       ignition_can = GET_BYTES_04(to_push) != 0;
     }
+
+    // Honda exception (ACURA_ILX / 2012 Civic): the F-CAN bus is completely
+    // dead with the key off and runs at about 1500 frames/s with the car on,
+    // so any POWERTRAIN_DATA frame means the car is on. Added because the
+    // switched ignition signal on this OBD-II port no longer reaches PA1.
+    if ((addr == 0x17C) && (len == 8)) {
+      ignition_can = true;
+    }
   }
 }
 

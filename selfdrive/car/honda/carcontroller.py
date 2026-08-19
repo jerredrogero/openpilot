@@ -122,6 +122,13 @@ class CarController():
     # *** compute control surfaces ***
     BRAKE_MAX = 1024//4
     if CS.CP.carFingerprint in (CAR.ACURA_ILX):
+      # DO NOT RAISE THIS. 0xF00 = 3840 is exactly the dbc limit for STEER_TORQUE on this
+      # car, and it is what this EPS accepts. Raised to 0x1000 (4096) on 2026-08-17 on the
+      # reasoning that other Honda Nidec cars use 0x1000 -- that was WRONG. Measured on the
+      # 2026-08-18 17-45-02 drive: first nonzero torque at t=94.2s, EPS latched fault_1 at
+      # t=94.4s, max commanded 4096. The latch then raises steerUnavailable [NO_ENTRY,
+      # IMMEDIATE_DISABLE] so openpilot cannot engage AT ALL for the rest of the trip
+      # (engaged 35 frames out of 22590). Reverted.
       STEER_MAX = 0xF00
     elif CS.CP.carFingerprint in (CAR.CRV, CAR.ACURA_RDX):
       STEER_MAX = 0x3e8  # CR-V only uses 12-bits and requires a lower value (max value from energee)
@@ -133,6 +140,11 @@ class CarController():
     # steer torque is converted back to CAN reference (positive when steering right)
     apply_gas = clip(actuators.gas, 0., 1.)
     apply_brake = int(clip(self.brake_last * BRAKE_MAX, 0, BRAKE_MAX - 1))
+    # The pedal 'interlock' was never the car: the PANDA was dropping our own steering
+    # frames whenever the driver's foot was on the gas (safety_honda.h pedal_pressed ->
+    # current_controls_allowed -> tx = 0). Fixed at source 2026-08-17, so the request
+    # gate and resume ramp that used to live here are gone -- each would have zeroed the
+    # command while the pedal was down, defeating the fix.
     apply_steer = int(clip(-actuators.steer * STEER_MAX, -STEER_MAX, STEER_MAX))
 
     lkas_active = enabled and not CS.steer_not_allowed

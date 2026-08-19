@@ -51,6 +51,12 @@ function launch {
   ln -sfn $(pwd) /data/pythonpath
   export PYTHONPATH="$PWD"
 
+  # cargateway (Axis Car telemetry). Guarded so it can never block openpilot boot:
+  # no config.json means no gateway. Lives outside /data/openpilot so git clean cannot eat it.
+  if [ -f /data/cargateway/config.json ]; then
+    (PYTHONPATH="$PWD" nohup python3.7 /data/cargateway/cargatewayd.py >> /data/cargateway/gateway.log 2>&1 &)
+  fi
+
   # start manager
   cd selfdrive
   ./manager.py

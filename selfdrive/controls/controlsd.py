@@ -134,6 +134,13 @@ def data_sample(CI, CC, sm, can_sock, driver_status, state, mismatch_counter, pa
   controls_allowed = sm['health'].controlsAllowed
   if not controls_allowed and enabled:
     mismatch_counter += 1
+  else:
+    # RESET (2026-08-17): without this the counter only cleared on disengagement, so
+    # every brief panda disarm accumulated across the whole drive and eventually hit the
+    # 200-frame threshold, disengaging with controlsMismatch. The comment above says it
+    # means to allow a mismatch for a couple of samples, which needs CONTINUOUS
+    # disagreement. Now it measures that.
+    mismatch_counter = 0
   if mismatch_counter >= 200:
     events.append(create_event('controlsMismatch', [ET.IMMEDIATE_DISABLE]))
 
@@ -270,6 +277,9 @@ def state_control(frame, rcv_frame, plan, path_plan, CS, CP, state, events, v_cr
   if state in [State.preEnabled, State.disabled]:
     LaC.reset()
     LoC.reset(v_pid=CS.vEgo)
+
+  # (A gas-pressed LaC.reset() lived here as a workaround for the panda dropping
+  # steer frames on throttle; fixed at source 2026-08-17.)
 
   elif state in [State.enabled, State.softDisabling]:
     # parse warnings from car specific interface
