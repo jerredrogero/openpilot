@@ -57,6 +57,11 @@ function launch {
     (PYTHONPATH="$PWD" nohup python3.7 /data/cargateway/cargatewayd.py >> /data/cargateway/gateway.log 2>&1 &)
   fi
 
+  # 0-60 timer (read-only carState listener). Same guard pattern as cargateway.
+  if [ -f /data/zerosixty/zerosixtyd.py ]; then
+    (PYTHONPATH="$PWD" nohup python3.7 /data/zerosixty/zerosixtyd.py >> /data/zerosixty/zerosixty.log 2>&1 &)
+  fi
+
   # start manager
   cd selfdrive
   ./manager.py
