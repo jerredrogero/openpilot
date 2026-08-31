@@ -21,6 +21,10 @@ class AlertManager():
 
   def add(self, frame, alert_type, enabled=True, extra_text_1='', extra_text_2=''):
     alert_type = str(alert_type)
+    # suppress all orange/red alerts (display + sound); safe because the
+    # disable state machine in controlsd runs on events, not on alerts
+    if self.alerts[alert_type].alert_status in (AlertStatus.userPrompt, AlertStatus.critical):
+      return
     added_alert = copy.copy(self.alerts[alert_type])
     added_alert.alert_text_1 += extra_text_1
     added_alert.alert_text_2 += extra_text_2
